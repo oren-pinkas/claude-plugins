@@ -1,0 +1,6 @@
+{
+  "name": "activity-logger",
+  "version": "1.0.0",
+  "description": "Auto-summarizes Claude Code sessions and generates stakeholder-scoped activity reports",
+  "type": "module"
+}

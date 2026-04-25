@@ -1,0 +1,22 @@
+{
+  "name": "oren-pinkas",
+  "version": "1.0.0",
+  "description": "Oren Pinkas personal Claude Code plugins",
+  "owner": {
+    "name": "Oren Pinkas",
+    "email": "oren@opmed.ai"
+  },
+  "plugins": [
+    {
+      "name": "activity-logger",
+      "description": "Auto-summarizes Claude Code sessions and generates stakeholder-scoped activity reports",
+      "version": "1.0.0",
+      "author": {
+        "name": "Oren Pinkas",
+        "email": "oren@opmed.ai"
+      },
+      "source": "./plugins/activity-logger",
+      "category": "productivity"
+    }
+  ]
+}

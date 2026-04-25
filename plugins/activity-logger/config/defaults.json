@@ -1,0 +1,7 @@
+{
+  "log_directory": "~/claude-activity-log",
+  "summary_model": "haiku",
+  "min_transcript_lines": 1,
+  "summary_timeout_seconds": 30,
+  "skip_reasons": ["clear", "other"]
+}

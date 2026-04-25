@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+exec 2>/tmp/claude-activity-logger-error.log
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${HOOK_DIR}/.." && pwd)"
+CONFIG="${PLUGIN_ROOT}/config/defaults.json"
+
+# --- Read config ---
+LOG_DIR=$(/usr/bin/python3 -c "import json; print(json.load(open('${CONFIG}'))['log_directory'])")
+LOG_DIR="${LOG_DIR/#\~/$HOME}"
+MIN_LINES=$(/usr/bin/python3 -c "import json; print(json.load(open('${CONFIG}'))['min_transcript_lines'])")
+TIMEOUT=$(/usr/bin/python3 -c "import json; print(json.load(open('${CONFIG}'))['summary_timeout_seconds'])")
+SKIP_REASONS=$(/usr/bin/python3 -c "import json; print(','.join(json.load(open('${CONFIG}'))['skip_reasons']))")
+MODEL=$(/usr/bin/python3 -c "import json; print(json.load(open('${CONFIG}'))['summary_model'])")
+
+# --- Read stdin JSON ---
+STDIN_JSON=$(cat)
+SESSION_ID=$(echo "$STDIN_JSON" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id','unknown'))")
+TRANSCRIPT_PATH=$(echo "$STDIN_JSON" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))")
+CWD=$(echo "$STDIN_JSON" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd',''))")
+REASON=$(echo "$STDIN_JSON" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('reason',''))")
+
+# --- Skip filtered reasons ---
+if echo "$SKIP_REASONS" | tr ',' '\n' | grep -qx "$REASON"; then
+    exit 0
+fi
+
+# --- Determine times ---
+TODAY=$(date +%Y-%m-%d)
+TIME_END=$(date +%H:%M)
+
+# Find session start time from ~/.claude/sessions/*.json
+TIME_START="unknown"
+for f in "$HOME/.claude/sessions/"*.json; do
+    SID=$(/usr/bin/python3 -c "import json; print(json.load(open('${f}')).get('sessionId',''))" 2>/dev/null || true)
+    if [ "$SID" = "$SESSION_ID" ]; then
+        STARTED_AT=$(/usr/bin/python3 -c "import json; print(json.load(open('${f}')).get('startedAt',0))" 2>/dev/null || true)
+        if [ "$STARTED_AT" != "0" ] && [ -n "$STARTED_AT" ]; then
+            TIME_START=$(/usr/bin/python3 -c "from datetime import datetime; print(datetime.fromtimestamp(${STARTED_AT}/1000).strftime('%H:%M'))")
+            START_DATE=$(/usr/bin/python3 -c "from datetime import datetime; print(datetime.fromtimestamp(${STARTED_AT}/1000).strftime('%Y-%m-%d'))")
+            TODAY="$START_DATE"
+        fi
+        break
+    fi
+done
+
+# --- Prepare output directory ---
+DAY_DIR="${LOG_DIR}/${TODAY}"
+mkdir -p "$DAY_DIR"
+OUTPUT_FILE="${DAY_DIR}/session-${SESSION_ID}.md"
+
+# --- Check transcript exists and is long enough ---
+if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
+    cat > "$OUTPUT_FILE" << FALLBACK
+---
+session_id: ${SESSION_ID}
+date: ${TODAY}
+time_start: "${TIME_START}"
+time_end: "${TIME_END}"
+project: ${CWD}
+project_name: $(basename "$CWD")
+processed: false
+commits: []
+prs: []
+files_changed: 0
+insertions: 0
+deletions: 0
+---
+
+Session transcript unavailable.
+FALLBACK
+    exit 0
+fi
+
+LINE_COUNT=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')
+if [ "$LINE_COUNT" -lt "$MIN_LINES" ]; then
+    cat > "$OUTPUT_FILE" << FALLBACK
+---
+session_id: ${SESSION_ID}
+date: ${TODAY}
+time_start: "${TIME_START}"
+time_end: "${TIME_END}"
+project: ${CWD}
+project_name: $(basename "$CWD")
+processed: true
+commits: []
+prs: []
+files_changed: 0
+insertions: 0
+deletions: 0
+---
+
+Brief session — no substantive work.
+FALLBACK
+    exit 0
+fi
+
+# --- Parse transcript ---
+TRANSCRIPT_TEXT=$(/usr/bin/python3 "${HOOK_DIR}/parse-transcript.py" "$TRANSCRIPT_PATH" 2>/dev/null || echo "Transcript parsing failed.")
+
+# --- Gather git data ---
+GIT_DATA=""
+GIT_LOG=""
+if [ -d "${CWD}/.git" ] || git -C "$CWD" rev-parse --git-dir > /dev/null 2>&1; then
+    GIT_LOG=$(git -C "$CWD" log --oneline --since="${TODAY}T${TIME_START}:00" --until="${TODAY}T${TIME_END}:59" --author="$(git -C "$CWD" config user.name 2>/dev/null || echo '')" 2>/dev/null || echo "")
+    GIT_DIFF_STAT=$(git -C "$CWD" diff --stat HEAD~5 HEAD 2>/dev/null || echo "")
+    GIT_SHORTSTAT=$(git -C "$CWD" diff --shortstat HEAD~5 HEAD 2>/dev/null || echo "")
+    GIT_DATA="=== GIT COMMITS ===
+${GIT_LOG:-No commits during this session.}
+
+=== GIT DIFF STAT ===
+${GIT_DIFF_STAT:-No file changes.}
+
+=== GIT SHORT STAT ===
+${GIT_SHORTSTAT:-No changes.}"
+fi
+
+# --- Gather PR data ---
+PR_DATA=""
+if command -v gh &> /dev/null; then
+    PR_DATA=$(cd "$CWD" && gh pr list --author @me --state all --json number,title,state,updatedAt --limit 10 2>/dev/null || echo "")
+    if [ -n "$PR_DATA" ] && [ "$PR_DATA" != "[]" ]; then
+        PR_DATA="=== GITHUB PRS ===
+${PR_DATA}"
+    else
+        PR_DATA=""
+    fi
+fi
+
+# --- Build context for claude -p ---
+PROJECT_NAME=$(basename "$CWD")
+CONTEXT="=== SESSION METADATA ===
+session_id: ${SESSION_ID}
+date: ${TODAY}
+time_start: ${TIME_START}
+time_end: ${TIME_END}
+project: ${CWD}
+project_name: ${PROJECT_NAME}
+
+${TRANSCRIPT_TEXT}
+
+${GIT_DATA}
+
+${PR_DATA}"
+
+PROMPT_TEMPLATE=$(cat "${HOOK_DIR}/summary-prompt.md")
+
+# --- Call claude -p (no timeout on macOS; hook is async so no user impact) ---
+SUMMARY=$(echo "$CONTEXT" | claude -p \
+    --model "$MODEL" \
+    --system-prompt "$PROMPT_TEMPLATE" \
+    --output-format text \
+    "Summarize this Claude Code session. Output ONLY the frontmatter+narrative format specified in your instructions. The session metadata, transcript, and git data are provided below:" \
+    2>/dev/null) || true
+
+# --- Fallback if claude -p failed ---
+if [ -z "$SUMMARY" ]; then
+    FIRST_PROMPT=$(echo "$TRANSCRIPT_TEXT" | grep "^User:" | head -1 | sed 's/^User: //')
+    LAST_PROMPT=$(echo "$TRANSCRIPT_TEXT" | grep "^User:" | tail -1 | sed 's/^User: //')
+    cat > "$OUTPUT_FILE" << FALLBACK
+---
+session_id: ${SESSION_ID}
+date: ${TODAY}
+time_start: "${TIME_START}"
+time_end: "${TIME_END}"
+project: ${CWD}
+project_name: ${PROJECT_NAME}
+processed: false
+commits: []
+prs: []
+files_changed: 0
+insertions: 0
+deletions: 0
+---
+
+Session summary generation failed. Raw context:
+- First prompt: ${FIRST_PROMPT:-N/A}
+- Last prompt: ${LAST_PROMPT:-N/A}
+- Git activity: ${GIT_LOG:-None}
+FALLBACK
+    exit 0
+fi
+
+# --- Write the summary ---
+echo "$SUMMARY" > "$OUTPUT_FILE"
