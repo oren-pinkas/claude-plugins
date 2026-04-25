@@ -1,0 +1,19 @@
+{
+  "my_slack_id": "U0914QJ8MA8",
+  "team": [
+    { "name": "Tomer Simcha", "slack_id": "U083J2DFE48", "role": "Fullstack Dev" },
+    { "name": "Oren Pinkas",  "slack_id": "U0914QJ8MA8" }
+  ],
+  "repos": [
+    {
+      "repo": "gen2-fe-dashboard",
+      "default_recipients": ["U083J2DFE48"],
+      "default_channel": null
+    },
+    {
+      "repo": "svc-gen2-fe-dashboard",
+      "default_recipients": ["U083J2DFE48"],
+      "default_channel": null
+    }
+  ]
+}

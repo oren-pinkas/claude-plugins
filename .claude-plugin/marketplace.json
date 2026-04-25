@@ -17,6 +17,17 @@
       },
       "source": "./plugins/activity-logger",
       "category": "productivity"
+    },
+    {
+      "name": "slack",
+      "description": "Slack messaging skills with a persona-driven theme system — send messages and PR review requests with style",
+      "version": "1.0.0",
+      "author": {
+        "name": "Oren Pinkas",
+        "email": "oren@opmed.ai"
+      },
+      "source": "./plugins/slack",
+      "category": "productivity"
     }
   ]
 }

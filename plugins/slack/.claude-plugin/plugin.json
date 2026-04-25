@@ -1,0 +1,8 @@
+{
+  "name": "slack",
+  "description": "Slack messaging skills with a persona-driven theme system — send messages and PR review requests with style",
+  "author": {
+    "name": "OpMed",
+    "email": "dev@opmed.ai"
+  }
+}
